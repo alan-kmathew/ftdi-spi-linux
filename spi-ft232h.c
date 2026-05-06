@@ -2680,8 +2680,7 @@ static int ft232h_intf_probe(struct usb_interface *intf,
 	}
 
 	priv->usb_dev_id = id;
-	/* Identify the FTDI channel from the alternate-setting (0=A,1=B,2=C,3=D) */
-	priv->index = intf->cur_altsetting->desc.bAlternateSetting + 1;
+	priv->index = intf->cur_altsetting->desc.bInterfaceNumber + 1;
 	priv->intf = intf;
 	priv->info = (struct ft232h_intf_info *)id->driver_info;
 
