@@ -971,7 +971,7 @@ static const struct file_operations ftdi_stats_reset_fops = {
 	.owner	= THIS_MODULE,
 	.open	= ftdi_stats_reset_open,
 	.write	= ftdi_stats_reset_write,
-	.llseek	= no_llseek,
+	.llseek	= noop_llseek,
 };
 
 #endif /* CONFIG_DEBUG_FS */
