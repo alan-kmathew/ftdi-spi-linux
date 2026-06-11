@@ -56,6 +56,13 @@ MODULE_PARM_DESC(gpio_base_num, "GPIO controller base number (if negative, dynam
 
 static int param_bus_num = -1;
 module_param_named(spi_bus_num, param_bus_num, int, 0600);
+
+/* Optional: bind a specific FT4232H interface (0..3) to the in-kernel
+ * tpm_tis_spi driver instead of the default spidev child. -1 disables. */
+static int tpm_channel = -1;
+module_param(tpm_channel, int, 0444);
+MODULE_PARM_DESC(tpm_channel,
+	"FT4232H interface number (0=A,1=B,2=C,3=D) to expose as tpm_tis_spi; -1=off");
 MODULE_PARM_DESC(spi_bus_num, "SPI controller bus number (if negative, dynamic allocation)");
 
 /*
@@ -326,6 +333,31 @@ static inline void spi_controller_put(struct spi_controller *ctlr)
 #define spi_register_controller(_ctlr) spi_register_master(_ctlr)
 #define spi_unregister_controller(_ctlr) spi_unregister_master(_ctlr)
 #endif
+
+/* Register a default child SPI device on CS0 of the given controller so a
+ * usable character device appears without requiring a board file or DT
+ * overlay. modalias selects which kernel driver binds:
+ *   - "spidev"        -> /dev/spidevN.0 (generic userspace SPI)
+ *   - "tpm_tis_spi"   -> /dev/tpm0 / /dev/tpmrm0 (kernel TPM 2.0 stack)
+ */
+static void ft232h_register_cs0(struct spi_controller *ctlr,
+				const char *modalias)
+{
+	struct spi_board_info info = {
+		.max_speed_hz = 1000000,
+		.bus_num      = ctlr->bus_num,
+		.chip_select  = 0,
+		.mode         = SPI_MODE_0,
+	};
+	strscpy(info.modalias, modalias, sizeof(info.modalias));
+	if (!spi_new_device(ctlr, &info))
+		dev_warn(&ctlr->dev,
+			 "ft232h: failed to register %s child on CS0\n", modalias);
+	else
+		dev_info(&ctlr->dev,
+			 "ft232h: registered %s child on bus %d CS0\n",
+			 modalias, ctlr->bus_num);
+}
 
 /* Handle scalar chip_select (<= v6.7) and array+mask (v6.8+). */
 #if defined(SPI_DEVICE_CS_CNT_MAX)
@@ -971,7 +1003,7 @@ static const struct file_operations ftdi_stats_reset_fops = {
 	.owner	= THIS_MODULE,
 	.open	= ftdi_stats_reset_open,
 	.write	= ftdi_stats_reset_write,
-	.llseek	= no_llseek,
+	.llseek	= noop_llseek,
 };
 
 #endif /* CONFIG_DEBUG_FS */
@@ -1893,6 +1925,14 @@ static int ftdi_spi_probe(struct platform_device *pdev)
 	}
 	
 	dev_info(dev, "spi_master: bus_num=%d\n", master->bus_num);
+	{
+		int chan = -1;
+		if (priv->intf && priv->intf->cur_altsetting)
+			chan = priv->intf->cur_altsetting->desc.bInterfaceNumber;
+		ft232h_register_cs0(master,
+			(tpm_channel >= 0 && chan == tpm_channel)
+				? "tpm_tis_spi" : "spidev");
+	}
 
 	ret = priv->iops->set_bitmode(priv->intf, 0x00, BITMODE_MPSSE);
 	if (ret < 0) {
@@ -2681,7 +2721,7 @@ static int ft232h_intf_probe(struct usb_interface *intf,
 
 	priv->usb_dev_id = id;
 	/* Identify the FTDI channel from the alternate-setting (0=A,1=B,2=C,3=D) */
-	priv->index = intf->cur_altsetting->desc.bAlternateSetting + 1;
+	priv->index = intf->cur_altsetting->desc.bInterfaceNumber + 1;
 	priv->intf = intf;
 	priv->info = (struct ft232h_intf_info *)id->driver_info;
 
