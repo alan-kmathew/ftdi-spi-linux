@@ -2125,6 +2125,7 @@ static int ftdi_set_clock(struct usb_interface *intf, int clock_freq_hz)
 	case 0x6010: /* FT2232 */
 	case 0x6011: /* FT4232 */
 	case 0x6014: /* FT232H */
+	case 0x6048: /* FT4232HA */
 	case 0x0146: /* GW16146 */
 		desc.len = 1;
 		if (clock_freq_hz <= (FTDI_CLK_30MHZ/65535)) {
@@ -3234,6 +3235,7 @@ static struct usb_device_id ft232h_intf_table[] = {
 #ifndef CONFIG_USB_SERIAL_FTDI_SIO
 	{ USB_DEVICE(0x0403, 0x6011), .driver_info = (kernel_ulong_t)&ft232h_spi_cfg_intf_info },
 	{ USB_DEVICE(0x0403, 0x6014), .driver_info = (kernel_ulong_t)&ft232h_spi_cfg_intf_info },
+	{ USB_DEVICE(0x0403, 0x6048), .driver_info = (kernel_ulong_t)&ft232h_spi_cfg_intf_info }, /* FT4232HA Mini Module */
 #endif
 	{ USB_DEVICE(0x2beb, 0x0146), .driver_info = (kernel_ulong_t)&ft232h_spi_cfg_intf_info },
 	{}
