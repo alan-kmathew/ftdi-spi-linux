@@ -327,6 +327,33 @@ static inline void spi_controller_put(struct spi_controller *ctlr)
 #define spi_unregister_controller(_ctlr) spi_unregister_master(_ctlr)
 #endif
 
+/* Register a default child SPI device on CS0 of the given controller so a
+ * usable character device appears without requiring a board file or DT
+ * overlay. modalias selects which kernel driver binds:
+ *   - "spidev"        -> /dev/spidevN.0 (generic userspace SPI)
+ *   - "tpm_tis_spi"   -> /dev/tpm0 / /dev/tpmrm0 (kernel TPM 2.0 stack)
+ */
+static void ft232h_register_cs0(struct spi_controller *ctlr,
+				const char *modalias)
+{
+	struct spi_board_info info = {
+		.modalias      = "dh2228fv",
+		.max_speed_hz = 1000000,
+		.bus_num      = ctlr->bus_num,
+		.chip_select  = 0,
+		.mode         = SPI_MODE_0,
+	};
+
+	strscpy(info.modalias, modalias, sizeof(info.modalias));
+	if (!spi_new_device(ctlr, &info))
+		dev_warn(&ctlr->dev,
+			 "ft232h: failed to register %s child on CS0\n", modalias);
+	else
+		dev_info(&ctlr->dev,
+			 "ft232h: registered %s child on bus %d CS0\n",
+			 modalias, ctlr->bus_num);
+}
+
 /* Handle scalar chip_select (<= v6.7) and array+mask (v6.8+). */
 #if defined(SPI_DEVICE_CS_CNT_MAX)
 static inline unsigned int ftdi_spi_chip_select(struct spi_device *spi)
@@ -1922,6 +1949,16 @@ static int ftdi_spi_probe(struct platform_device *pdev)
 	if (ret < 0)
 		goto err;
 
+	{
+		int chan = -1;
+
+		if (priv->intf && priv->intf->cur_altsetting)
+			chan = priv->intf->cur_altsetting->desc.bInterfaceNumber;
+
+		ft232h_register_cs0(master,
+				    (chan == 1) ? "tpm_tis_spi" : "dh2228fv");
+	}
+
 	return 0;
 err:
 	platform_set_drvdata(pdev, NULL);
@@ -2725,7 +2762,11 @@ static int ft232h_intf_probe(struct usb_interface *intf,
 
 	priv->udev = usb_get_dev(interface_to_usbdev(intf));
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
+	priv->id = ida_alloc(&ftdi_devid_ida, GFP_KERNEL);
+#else
 	priv->id = ida_simple_get(&ftdi_devid_ida, 0, 0, GFP_KERNEL);
+#endif
 	if (priv->id < 0)
 		return priv->id;
 
@@ -2738,7 +2779,11 @@ static int ft232h_intf_probe(struct usb_interface *intf,
 
 	return 0;
 err:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
+	ida_free(&ftdi_devid_ida, priv->id);
+#else
 	ida_simple_remove(&ftdi_devid_ida, priv->id);
+#endif
 	return ret;
 }
 
@@ -2777,16 +2822,26 @@ static int ftdi_mpsse_gpio_get(struct gpio_chip *chip, unsigned int offset)
 	return !!val;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+static int ftdi_mpsse_gpio_set(struct gpio_chip *chip, unsigned int offset,
+				int value)
+#else
 static void ftdi_mpsse_gpio_set(struct gpio_chip *chip, unsigned int offset,
 				int value)
+#endif
 {
 	struct ft232h_intf_priv *priv = gpiochip_get_data(chip);
 	bool low;
+	int ret;
 
 	mutex_lock(&priv->io_mutex);
 	if (!priv->intf) {
 		mutex_unlock(&priv->io_mutex);
+		#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+		return -ENODEV;
+		#else
 		return;
+		#endif
 	}
 	mutex_unlock(&priv->io_mutex);
 
@@ -2809,9 +2864,13 @@ static void ftdi_mpsse_gpio_set(struct gpio_chip *chip, unsigned int offset,
 			priv->gpioh_mask &= ~BIT(offset - 4);
 	}
 
-	ftdi_mpsse_set_port_pins(priv, low);
+	ret = ftdi_mpsse_set_port_pins(priv, low);
 
 	mutex_unlock(&priv->ops_mutex);
+
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+	return ret;
+	#endif
 }
 
 static int ftdi_mpsse_gpio_direction_input(struct gpio_chip *chip,
@@ -3181,7 +3240,11 @@ static void ft232h_intf_disconnect(struct usb_interface *intf)
 	mutex_unlock(&priv->io_mutex);
 
 	usb_put_dev(priv->udev);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
+	ida_free(&ftdi_devid_ida, priv->id);
+#else
 	ida_simple_remove(&ftdi_devid_ida, priv->id);
+#endif
 
 	mutex_destroy(&priv->io_mutex);
 	mutex_destroy(&priv->ops_mutex);
