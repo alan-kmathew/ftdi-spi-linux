@@ -1720,6 +1720,37 @@ static int ftdi_mpsse_init(struct ftdi_spi *priv)
 	return 0;
 }
 
+/* Restore MPSSE state (purge FIFOs, re-enter MPSSE, redo clock/pin/latency). */
+static int ftdi_spi_hw_reinit(struct ftdi_spi *priv)
+{
+	struct ft232h_intf_priv *ip = usb_get_intfdata(priv->intf);
+	int ret;
+
+	if (ip) {
+		unsigned int pipe = usb_sndctrlpipe(ip->udev, 0);
+		u8 rt = USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT;
+
+		/* Best-effort purge of stale RX (1) and TX (2) FIFO data. */
+		usb_control_msg(ip->udev, pipe, FTDI_SIO_RESET_REQUEST, rt, 1,
+				ip->index, NULL, 0, USB_CTRL_SET_TIMEOUT);
+		usb_control_msg(ip->udev, pipe, FTDI_SIO_RESET_REQUEST, rt, 2,
+				ip->index, NULL, 0, USB_CTRL_SET_TIMEOUT);
+	}
+
+	ret = priv->iops->set_bitmode(priv->intf, 0x00, BITMODE_MPSSE);
+	if (ret < 0)
+		return ret;
+
+	priv->last_mode = 0xffff;
+	priv->last_speed_hz = 0;
+
+	ret = ftdi_mpsse_init(priv);
+	if (ret < 0)
+		return ret;
+
+	return priv->iops->set_latency(priv->intf, param_latency);
+}
+
 static int ftdi_mpsse_gpio_probe(struct usb_interface *intf);
 static int ftdi_mpsse_irq_probe(struct usb_interface *intf);
 
@@ -1921,26 +1952,12 @@ static int ftdi_spi_probe(struct platform_device *pdev)
 	
 	dev_info(dev, "spi_master: bus_num=%d\n", master->bus_num);
 
-	ret = priv->iops->set_bitmode(priv->intf, 0x00, BITMODE_MPSSE);
+	ret = ftdi_spi_hw_reinit(priv);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "Failed to set MPSSE mode\n");
+		dev_err(&pdev->dev, "FTDI MPSSE init failed: %d\n", ret);
 		goto err;
 	}
 
-	priv->last_mode = 0xffff;
-
-	ret = ftdi_mpsse_init(priv);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "MPSSE init failed\n");
-		goto err;
-	}
-
-	ret = priv->iops->set_latency(priv->intf, param_latency);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "Set latency failed\n");
-		goto err;
-	}
-	
 	ret = ftdi_mpsse_gpio_probe(priv->intf);
 	if (ret < 0)
 		goto err;
@@ -1948,6 +1965,9 @@ static int ftdi_spi_probe(struct platform_device *pdev)
 	ret = ftdi_mpsse_irq_probe(priv->intf);
 	if (ret < 0)
 		goto err;
+
+	/* Let the MPSSE engine settle after init before child drivers probe. */
+	msleep(100);
 
 	{
 		int chan = -1;
@@ -3251,6 +3271,55 @@ static void ft232h_intf_disconnect(struct usb_interface *intf)
 }
 
 /*
+ * Keep the driver bound across a USB reset: pre_reset quiesces the SPI queue,
+ * post_reset restores MPSSE state and resumes it.
+ */
+static int ft232h_intf_pre_reset(struct usb_interface *intf)
+{
+	struct ft232h_intf_priv *priv = usb_get_intfdata(intf);
+	struct spi_controller *master;
+
+	if (!priv || !priv->spi_pdev)
+		return 0;
+
+	master = platform_get_drvdata(priv->spi_pdev);
+	if (master)
+		spi_controller_suspend(master);
+
+	return 0;
+}
+
+static int ft232h_intf_post_reset(struct usb_interface *intf)
+{
+	struct ft232h_intf_priv *priv = usb_get_intfdata(intf);
+	struct spi_controller *master;
+	struct ftdi_spi *sp;
+	int ret;
+
+	if (!priv || !priv->spi_pdev)
+		return 0;
+
+	master = platform_get_drvdata(priv->spi_pdev);
+	if (!master)
+		return 0;
+
+	sp = spi_controller_get_devdata(master);
+
+	ret = ftdi_spi_hw_reinit(sp);
+	if (ret < 0) {
+		/* Fail closed: leave the queue suspended rather than drive a
+		 * half-initialised device. */
+		dev_err(&intf->dev,
+			"MPSSE re-init after reset failed: %d; controller left suspended\n",
+			ret);
+		return ret;
+	}
+
+	spi_controller_resume(master);
+	return 0;
+}
+
+/*
  * USB device information
  */
 static struct usb_device_id ft232h_intf_table[] = {
@@ -3269,6 +3338,8 @@ static struct usb_driver ft232h_intf_driver = {
 	.id_table	= ft232h_intf_table,
 	.probe		= ft232h_intf_probe,
 	.disconnect	= ft232h_intf_disconnect,
+	.pre_reset	= ft232h_intf_pre_reset,
+	.post_reset	= ft232h_intf_post_reset,
 };
 
 module_usb_driver(ft232h_intf_driver);
